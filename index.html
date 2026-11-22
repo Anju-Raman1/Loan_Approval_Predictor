@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Loan Approval Predictor</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f4f6f8; color: #222; margin: 0; padding: 20px; }
+    .card { max-width: 540px; margin: 20px auto; background: #fff; padding: 24px;
+            border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,.1); }
+    h1 { font-size: 24px; text-align: center; margin: 0 0 6px; }
+    p.sub { text-align: center; color: #555; font-size: 14px; margin: 0 0 10px; }
+    .warn { background: #fff7e6; border: 1px solid #f5d79e; color: #7a5200; font-size: 13px;
+            padding: 10px; border-radius: 8px; margin-top: 12px; line-height: 1.5; }
+    label { display: block; margin-top: 14px; font-size: 14px; }
+    label span { display: block; color: #777; font-size: 12px; margin-top: 2px; }
+    input, select { width: 100%; padding: 9px; margin-top: 4px; box-sizing: border-box;
+                    border: 1px solid #ccc; border-radius: 6px; font-size: 15px; background: #fff; }
+    button { width: 100%; margin-top: 22px; padding: 12px; background: #2563eb; color: #fff;
+             border: 0; border-radius: 8px; font-size: 16px; cursor: pointer; }
+    button:hover { background: #1d4ed8; }
+    button:disabled { background: #9ca3af; cursor: wait; }
+    #result { margin-top: 20px; padding: 14px; border-radius: 8px; display: none; }
+    #result.yes { background: #e8f5e9; display: block; }
+    #result.no { background: #fdecea; display: block; }
+    #result.bad { background: #fff7e6; color: #7a5200; font-size: 14px; display: block; text-align: center; }
+    #result .verdict { font-size: 22px; font-weight: bold; text-align: center; }
+    #result .pct { font-size: 14px; color: #444; margin-top: 4px; text-align: center; line-height: 1.5; }
+    #result h3 { font-size: 13px; color: #555; margin: 14px 0 6px; }
+    #result ol { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.7; }
+    #status { text-align: center; font-size: 13px; color: #777; margin-top: 12px; }
+    .note { margin-top: 18px; font-size: 12px; color: #777; text-align: center; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🏦 Loan Approval Predictor</h1>
+    <p class="sub">A decision tree trained on about 600 home loan applications</p>
+    <div class="warn">
+      <b>Educational project only.</b> This is not a lending tool and must not be used to make
+      real decisions about anyone’s loan.
+    </div>
+
+    <form id="form">
+      <div id="fields"></div>
+      <button type="submit" id="btn" disabled>Loading model…</button>
+    </form>
+
+    <div id="result"></div>
+    <div id="status"></div>
+
+    <p class="note">
+      The model runs entirely in your browser. It was trained on a small dataset from one company,
+      and it does not use gender or marital status.
+    </p>
+  </div>
+
+  <script>
+    var model = null;
+
+    // Labels shown above each field
+    var LABELS = {
+      ApplicantIncome: "Applicant income (per month)",
+      CoapplicantIncome: "Co-applicant income (per month)",
+      LoanAmount: "Loan amount (in thousands)",
+      Loan_Amount_Term: "Loan term (months)",
+      Dependents: "Number of dependents",
+      Education: "Education",
+      Self_Employed: "Self-employed",
+      Credit_History: "Credit history",
+      Property_Area: "Property area"
+    };
+
+    // Short names used in the decision path (including the calculated features)
+    var SHORT = {
+      ApplicantIncome: "Applicant income",
+      CoapplicantIncome: "Co-applicant income",
+      LoanAmount: "Loan amount",
+      Loan_Amount_Term: "Loan term",
+      TotalIncome: "Total income (applicant + co-applicant)",
+      EMI: "Estimated monthly instalment",
+      EMI_to_Income: "Instalment as a share of total income",
+      Dependents: "Dependents",
+      Education: "Education",
+      Self_Employed: "Self-employed",
+      Credit_History: "Credit history",
+      Property_Area: "Property area"
+    };
+
+    // Build the form from the settings stored in model.json
+    function buildForm() {
+      var html = "";
+      model.input_cols.forEach(function (col) {
+        var r = model.ranges[col];
+        html += '<label>' + LABELS[col] +
+                '<input type="number" id="' + col + '" step="any" min="' + r[0] + '" max="' + r[1] +
+                '" value="' + model.defaults_num[col] + '" required>' +
+                '<span>Range ' + r[0].toLocaleString("en-US") + ' to ' + r[1].toLocaleString("en-US") + '.</span></label>';
+      });
+      model.cat_cols.forEach(function (col, k) {
+        html += '<label>' + LABELS[col] + '<select id="' + col + '">';
+        model.categories[k].forEach(function (c) {
+          var sel = (c === model.defaults_cat[col]) ? " selected" : "";
+          html += '<option value="' + c + '"' + sel + '>' + c + '</option>';
+        });
+        html += '</select></label>';
+      });
+      document.getElementById("fields").innerHTML = html;
+    }
+
+    // The calculated features, with the same formulas as the notebook
+    function calculateFeatures(v) {
+      var f = {};
+      model.input_cols.forEach(function (c, i) { f[c] = v[i]; });
+      f.TotalIncome = v[0] + v[1];
+      f.EMI = v[2] * 1000 / v[3];
+      f.EMI_to_Income = f.EMI / f.TotalIncome;
+      return f;
+    }
+
+    // Find which column and category a 0/1 feature stands for
+    function categoryOf(featureIndex) {
+      var j = featureIndex - model.model_num_cols.length;
+      for (var k = 0; k < model.cat_cols.length; k++) {
+        if (j < model.categories[k].length) { return { col: model.cat_cols[k], cat: model.categories[k][j] }; }
+        j -= model.categories[k].length;
+      }
+      return null;
+    }
+
+    function formatValue(col, v) {
+      if (col === "EMI_to_Income") { return (v * 100).toLocaleString("en-US", { maximumFractionDigits: 1 }) + "%"; }
+      return v.toLocaleString("en-US", { maximumFractionDigits: 1 });
+    }
+
+    // Describe one question of the tree and the answer taken
+    function describeStep(featureIndex, threshold, wentLeft) {
+      if (featureIndex < model.model_num_cols.length) {
+        var col = model.model_num_cols[featureIndex];
+        return wentLeft ? SHORT[col] + " is " + formatValue(col, threshold) + " or less"
+                        : SHORT[col] + " is more than " + formatValue(col, threshold);
+      }
+      var c = categoryOf(featureIndex);
+      return wentLeft ? SHORT[c.col] + " is not " + c.cat : SHORT[c.col] + " is " + c.cat;
+    }
+
+    // Walk the tree from the top to a leaf, writing down every step
+    function predict(inputValues, catValues) {
+      var calc = calculateFeatures(inputValues);
+      // The model was trained on 32-bit numbers, so convert the same way
+      var x = model.model_num_cols.map(function (c) { return Math.fround(calc[c]); });
+      model.categories.forEach(function (cats, k) {
+        cats.forEach(function (c) { x.push(catValues[k] === c ? 1 : 0); });
+      });
+
+      var node = 0;
+      var steps = [];
+      while (model.left[node] !== -1) {
+        var f = model.feature[node];
+        var goLeft = x[f] <= model.threshold[node];
+        steps.push(describeStep(f, model.threshold[node], goLeft));
+        node = goLeft ? model.left[node] : model.right[node];
+      }
+      return { share: model.prob[node], approved: model.prob[node] > model.approve_above, steps: steps };
+    }
+
+    // Load model.json (must be in the same folder as this page)
+    fetch("model.json")
+      .then(function (res) {
+        if (!res.ok) { throw new Error("model.json not found"); }
+        return res.json();
+      })
+      .then(function (data) {
+        model = data;
+        buildForm();
+        document.getElementById("btn").disabled = false;
+        document.getElementById("btn").textContent = "Predict";
+      })
+      .catch(function () {
+        document.getElementById("btn").textContent = "Model not loaded";
+        document.getElementById("status").textContent =
+          "Could not load model.json. Open this page from its website link, not by double-clicking the file.";
+      });
+
+    document.getElementById("form").addEventListener("submit", function (e) {
+      e.preventDefault();
+      var box = document.getElementById("result");
+      var inputValues = [];
+      var catValues = [];
+
+      for (var j = 0; j < model.input_cols.length; j++) {
+        var col = model.input_cols[j];
+        var input = document.getElementById(col);
+        var num = parseFloat(input.value);
+        if (isNaN(num) || num < parseFloat(input.min) || num > parseFloat(input.max)) {
+          box.className = "bad";
+          box.textContent = LABELS[col] + " must be between " + input.min + " and " + input.max + ".";
+          return;
+        }
+        inputValues.push(num);
+      }
+      if (inputValues[3] <= 0 || inputValues[0] + inputValues[1] <= 0) {
+        box.className = "bad";
+        box.textContent = "The loan term and the total income must be above zero.";
+        return;
+      }
+      model.cat_cols.forEach(function (col) {
+        catValues.push(document.getElementById(col).value);
+      });
+
+      var r = predict(inputValues, catValues);
+      var html = '<div class="verdict">' + (r.approved ? "✅ Likely approved" : "❌ Likely rejected") + '</div>' +
+                 '<div class="pct">' + (r.share * 100).toFixed(0) + '% of similar past applications were approved</div>';
+      if (model.approve_above > 0.5) {
+        html += '<div class="pct">This model is set up to be cautious: it approves only when more than ' +
+                (model.approve_above * 100).toFixed(0) + '% of similar past applications were approved.</div>';
+      }
+      html += '<h3>How the tree decided (each question, in order)</h3><ol>';
+      r.steps.forEach(function (s) { html += '<li>' + s + '</li>'; });
+      html += '</ol>' +
+              '<div class="pct" style="margin-top:12px">On its test applications, this model was right about ' +
+              model.test_accuracy + '% of the time and rejected ' + model.test_rejected_caught +
+              '% of the applications that really were rejected. Educational demo only.</div>';
+
+      box.className = r.approved ? "yes" : "no";
+      box.innerHTML = html;
+    });
+  </script>
+</body>
+</html>
